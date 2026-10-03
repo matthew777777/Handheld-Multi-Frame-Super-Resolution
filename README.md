@@ -7,7 +7,7 @@
 This repository contains a non-official implementation of the “Handheld Multi-Frame Super-Resolution algorithm” paper by Wronski et al. (used in the Google Pixel 3 camera), which performs simultaneously multi-image super-resolution demosaicking and denoising from a burst of raw photgraphs. To the best of our knowledge, this is the first publicly available comprehensive implementation of this well-acclaimed paper, for which no official code has been released so far.
  
 The original paper can be found [here](https://sites.google.com/view/handheld-super-res/), whereas our publication detailing the implementation is available on [IPOL](https://www.ipol.im/pub/pre/460). In this companion publication, we fill the implementation blanks of the original SIGGRAPH paper, and disclose many details to actually implement the method.
-Note that our Numba-based implementation is not as fast as that of Google. It is mainly for scientific and educational purpose, with a special care given to make the code as readable and understandable as possible, and was not optimized to minimize the execution time or the memory usage as in an industrial context. Yet, on high-end consumer grade GPUs (NVIDIA RTX 3090 GPU), a 12MP burst of 20 images is expected to generate a 48MP image within less than 4 seconds (without counting Numba's just-in-time compilation), which is enough for running comparisons, or being the base of a faster implementation. 
+Note that our Numba-based implementation is not as fast as that of Google. It is mainly for scientific and educational purpose, with a special care given to make the code as readable and understandable as possible, and was not optimized to minimize the execution time or the memory usage as in an industrial context. This is a CPU-only port (Numba `njit` + PyTorch CPU, no GPU required), so it runs anywhere including Apple Silicon Macs, but large bursts take minutes rather than seconds: for reference, a 3-frame burst of 512×512 raws reconstructs a 1024×1024 image in about 12 seconds on an M1 Mac (including Numba's just-in-time compilation). 
 
 We hope this code and the details in the IPOL publication will help the image processing and computational photography communities, and foster new top-of-the-line super-resolution approaches. Please find below two examples of demosaicking and super-resolution from a real raw burst from [this repository](https://github.com/goutamgmb/deep-rep). 
 
@@ -35,9 +35,7 @@ source .venv/bin/activate
 python -m pip install .
 ```
 
-> CUDA runtime libraries are provided by the `numba-cuda[cu13]` and `torch` packages, so a system-wide CUDA Toolkit installation is generally not required; a compatible NVIDIA driver should be sufficient. If you encounter CUDA-related issues, installing the CUDA Toolkit separately may be necessary: This can be done system-wide or through an environment manager such as Conda.
-> 
-> The installation uses CUDA 13. CUDA 12 should work as well; users who require it can change the dependency in `pyproject.toml` to `numba-cuda[cu12]` before installing. 
+> This port runs entirely on CPU (Numba multithreaded kernels + PyTorch CPU). No GPU, NVIDIA driver, or CUDA Toolkit is required, and installation works on x86-64 and ARM64 (including Apple Silicon) via the same commands.
 
 
 ### Running the code
@@ -56,6 +54,17 @@ If noise correction is enabled (the default), you wille also need to provide the
 `--noise-model.lut-path data/your_camera_noise.npz` (see below).
 
 To obtain the bursts used in the publication, please download the latest release of the repo. It contains the code and two raw bursts of respectively 13 images from [[Bhat et al., ICCV21]](https://arxiv.org/abs/2108.08286) and 20 images from [[Lecouat et al., SIGGRAPH22]](https://arxiv.org/abs/2207.14671). Otherwise specify the path to any burst of raw images, e.g., `*.dng`, `*.ARW` or `*.CR2` for instance.
+
+### Running the tests
+The CPU regression suite (synthetic end-to-end reconstruction, block-matching shift recovery, and a self-contained DNG burst test) runs with the standard library runner:
+
+```bash
+# uv
+uv run python -m unittest discover tests -v
+
+# pip
+python -m unittest discover tests -v
+```
 
 ## DNG output
 

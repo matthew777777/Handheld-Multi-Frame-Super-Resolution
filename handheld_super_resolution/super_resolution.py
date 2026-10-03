@@ -2,7 +2,7 @@
 """
 Created on Fri Sep 30 16:56:22 2022
 
-This script contains : 
+This script contains :
     - The implementation of Alg. 1, the main the body of the method
     - The implementation of Alg. 2, where the function necessary to
         compute the optical flow are called
@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Union, Tuple, Dict
 import numpy as np
 from numpy.typing import NDArray
-from numba import cuda
 
 from .utils_image import compute_grey_images, apply_orientation, rggb_to_cfa, estimate_image_snr
 from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, divide, add, timer
@@ -47,22 +46,22 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
         Reference frame J_1
     comp_imgs : Array[N-1, imshape_y, imshape_x]
         Remaining frames of the burst J_2, ..., J_N
-        
+
     config : Config
         parameters.
 
     Returns
     -------
-    num : device Array[imshape_y*s, imshape_y*s, 3]
+    num : Array[imshape_y*s, imshape_y*s, 3]
         generated RGB image WITHOUT any post-processing.
     debug_dict : dict
         Contains the accumulated robustness map when requested. Per-frame
         diagnostics are streamed to disk when debugging is enabled.
 
     """
-    
+
     grey_method = config.alignment.grey_method
-    
+
     ### verbose and timing related stuff
     verbose = config.verbose >= 1
     verbose_2 = config.verbose >= 2
@@ -92,60 +91,57 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
                 "validated noise_model.lut_path"
             )
 
-    #### Moving to GPU
-    cuda_ref_img = cuda.to_device(ref_img)
+    #### Preparing buffers
+    ref_arr = np.ascontiguousarray(ref_img)
 
     # This running buffer is for the image being processed
-    stream = cuda.stream()
-    cuda_img = cuda.device_array_like(comp_imgs[0], stream=stream)
-    cuda.synchronize()
-    cuda_sigma_sq_curve = cuda.to_device(np.asarray(config.noise_model.sigma_sq_curve, dtype=np.float32))
-    cuda_d_sq_curve = cuda.to_device(np.asarray(config.noise_model.d_sq_curve, dtype=np.float32))
-    
+    frame_buf = np.empty_like(comp_imgs[0])
+    sigma_sq_curve_arr = np.asarray(config.noise_model.sigma_sq_curve, dtype=np.float32)
+    d_sq_curve_arr = np.asarray(config.noise_model.d_sq_curve, dtype=np.float32)
+
     if verbose :
         print("\nProcessing reference image ---------\n")
         t1 = time.perf_counter()
 
     #### Raw to grey
     if bayer_mode :
-        cuda_ref_grey = compute_grey_images_(cuda_ref_img, grey_method)
+        ref_grey = compute_grey_images_(ref_arr, grey_method)
     else:
-        cuda_ref_grey = cuda_ref_img
+        ref_grey = ref_arr
 
     ref_pyramid, tyled_pyr, ref_tiled_fft, ref_gradx, ref_grady, ref_hessian = init_alignment_(
-        cuda_ref_grey, config, debug_writer
+        ref_grey, config, debug_writer
     )
 
     #### Local stats estimation
     if config.robustness.enabled:
-        ref_local_means, ref_local_stds = init_robustness_(cuda_ref_img, config)
+        ref_local_means, ref_local_stds = init_robustness_(ref_arr, config)
     else:
         ref_local_means, ref_local_stds = None, None
 
-    
+
     accumulated_r = None
     if config.robustness.save_mask and config.robustness.enabled:
-        assert ref_local_means
-        accumulated_r = cuda.to_device(np.zeros(ref_local_means.shape[1:]))
+        assert ref_local_means is not None
+        accumulated_r = np.zeros(ref_local_means.shape[1:])
 
-    native_imshape_y, native_imshape_x = cuda_ref_img.shape
+    native_imshape_y, native_imshape_x = ref_arr.shape
     output_size = (
         round(config.scale*native_imshape_y),
         round(config.scale*native_imshape_x))
-    
-    num = cuda.to_device(np.zeros((*output_size, 3), dtype = DEFAULT_NUMPY_FLOAT_TYPE))
-    den = cuda.to_device(np.zeros((*output_size, 3), dtype = DEFAULT_NUMPY_FLOAT_TYPE))
+
+    num = np.zeros((*output_size, 3), dtype = DEFAULT_NUMPY_FLOAT_TYPE)
+    den = np.zeros((*output_size, 3), dtype = DEFAULT_NUMPY_FLOAT_TYPE)
 
     #### Ref kernel estimation
-    cuda_kernels = estimate_kernels_(cuda_ref_img, config)
-    
+    kernels = estimate_kernels_(ref_arr, config)
+
     ##### Merge ref
-    dummy_alignment = cuda.to_device(np.zeros(ref_hessian[-1].shape[:-1], dtype = DEFAULT_NUMPY_FLOAT_TYPE))
-    dummy_r = cuda.to_device(np.ones(cuda_ref_img.shape, dtype = DEFAULT_NUMPY_FLOAT_TYPE))
-    merge_(cuda_ref_img, dummy_alignment, cuda_kernels, dummy_r, num, den, config)
-    
+    dummy_alignment = np.zeros(ref_hessian[-1].shape[:-1], dtype = DEFAULT_NUMPY_FLOAT_TYPE)
+    dummy_r = np.ones(ref_arr.shape, dtype = DEFAULT_NUMPY_FLOAT_TYPE)
+    merge_(ref_arr, dummy_alignment, kernels, dummy_r, num, den, config)
+
     if verbose :
-        cuda.synchronize()
         getTime(t1, '\nRef Img processed (Total)')
 
 
@@ -154,70 +150,65 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
             debug_writer.next_frame()
 
         if verbose :
-            cuda.synchronize()
             print("\nProcessing image {} ---------\n".format(im_id+1))
             im_time = time.perf_counter()
-        
-        #### Moving to GPU
-        cuda.to_device(comp_imgs[im_id], to=cuda_img, stream=stream)
-        
+
+        #### Copying to the running buffer
+        np.copyto(frame_buf, comp_imgs[im_id])
+
         #### Compute Grey Images
         if bayer_mode:
-            cuda_im_grey = compute_grey_images(cuda_img, grey_method)
+            frame_grey = compute_grey_images(frame_buf, grey_method)
         else:
-            cuda_im_grey = cuda_img
+            frame_grey = frame_buf
 
         alignment = align_(ref_pyramid, tyled_pyr, ref_tiled_fft, ref_gradx, ref_grady, ref_hessian,
-                        cuda_im_grey, config, debug_writer)
-        
+                        frame_grey, config, debug_writer)
+
         if debug_writer is not None:
-            debug_writer.write_flow("optical_flow", alignment.copy_to_host())
-            
+            debug_writer.write_flow("optical_flow", alignment)
+
         #### Robustness
         if config.robustness.enabled:
             assert ref_local_means is not None
             assert ref_local_stds is not None
             robustness = compute_robustness_(
-                cuda_img, ref_local_means, ref_local_stds, alignment,
-                (cuda_sigma_sq_curve, cuda_d_sq_curve), config, debug_writer,
+                frame_buf, ref_local_means, ref_local_stds, alignment,
+                (sigma_sq_curve_arr, d_sq_curve_arr), config, debug_writer,
             )
         else:
-            temp = np.ones_like(cuda_img, DEFAULT_NUMPY_FLOAT_TYPE)
-            robustness = cuda.to_device(temp)
+            robustness = np.ones_like(frame_buf, DEFAULT_NUMPY_FLOAT_TYPE)
 
         if accumulated_r is not None:
             add(accumulated_r, robustness)
-        
+
         #### Kernel estimation
-        cuda_kernels = estimate_kernels_(cuda_img, config)
-        
+        kernels = estimate_kernels_(frame_buf, config)
+
         #### Merging
-        merge_(cuda_img, alignment, cuda_kernels, robustness, num, den, config)
-        
+        merge_(frame_buf, alignment, kernels, robustness, num, den, config)
+
         if verbose :
-            cuda.synchronize()
             getTime(im_time, '\nImage processed (Total)')
-            
-        stream.synchronize()
 
 
-        
+
     # num is outwritten into num/den
     divide_(num, den)
 
     if debug_writer is not None:
         debug_writer.write_scalar_channels(
-            "den", den.copy_to_host(), ("r", "g", "b")
+            "den", den, ("r", "g", "b")
         )
-    
+
     if verbose :
         s = '\nTotal ellapsed time : '
         print(s, ' ' * (50 - len(s)), ': ', round((time.perf_counter() - t1), 2), 'seconds')
-    
-    if config.robustness.save_mask and config.robustness.enabled and accumulated_r:
-        debug_dict['accumulated robustness'] = accumulated_r.copy_to_host()
-        
-    return num.copy_to_host(), debug_dict
+
+    if config.robustness.save_mask and config.robustness.enabled and accumulated_r is not None:
+        debug_dict['accumulated robustness'] = accumulated_r
+
+    return num, debug_dict
 
 
 def process(burst_path: Union[Path, str], config: Config):
@@ -242,7 +233,7 @@ def process(burst_path: Union[Path, str], config: Config):
     currentTime, verbose_1, verbose_2 = (time.perf_counter(),
                                          config.verbose >= 1,
                                          config.verbose >= 2)
-    
+
     # reading image stack
     dng_stack = load_dng_burst(burst_path)
     ref_raw, raw_comp = dng_stack.get_raw_arrays() # Scale [black level, whiteleve] -> [0, 1] WITHOUT WB, clipping or anything
@@ -274,12 +265,11 @@ def process(burst_path: Union[Path, str], config: Config):
         sigma_sq_curve = noise_lut.sigma_noise_sq
         d_sq_curve = noise_lut.d_noise_sq
     else:
-        # The CUDA call signature remains fixed when correction is disabled.
         sigma_sq_curve = np.zeros(2, dtype=np.float32)
         d_sq_curve = np.zeros(2, dtype=np.float32)
-    
-    
-    if verbose_2:   
+
+
+    if verbose_2:
         currentTime = getTime(currentTime, ' -- Read raw files')
 
     #### Estimating ref image SNR
@@ -289,9 +279,9 @@ def process(burst_path: Union[Path, str], config: Config):
             print(f"Estimated snr: {snr:.2f} dB")
     else:
         snr = config.force_snr
-    
+
     update_snr_config(config, snr)
-    
+
     sanitize_config(config, ref_raw.shape)
 
     if verbose_1:
@@ -299,8 +289,8 @@ def process(burst_path: Union[Path, str], config: Config):
 
     config.noise_model.sigma_sq_curve = sigma_sq_curve.tolist()
     config.noise_model.d_sq_curve = d_sq_curve.tolist()
-    
-    
+
+
     #### Running the handheld pipeline
     hr_output, debug_dict = main(ref_raw.astype(DEFAULT_NUMPY_FLOAT_TYPE), raw_comp.astype(DEFAULT_NUMPY_FLOAT_TYPE), config)
 
@@ -318,22 +308,22 @@ def process(burst_path: Union[Path, str], config: Config):
     hr_output = np.moveaxis(hr_output, 0, -1)
     if 'accumulated robustness' in debug_dict:
         debug_dict['accumulated robustness'] = rggb_to_cfa(debug_dict['accumulated robustness'], dng_stack.cfa)
-    
+
 
     #### post processing
     post_processing_enabled = config.postprocessing.enabled
-    
+
     if post_processing_enabled:
         if verbose_2:
             print('-- Post processing image')
-        
-        hr_output = raw2rgb.postprocess(hr_output, dng_stack, config) 
-        
+
+        hr_output = raw2rgb.postprocess(hr_output, dng_stack, config)
+
     if 'accumulated robustness' in debug_dict and config.postprocessing.orientate_image:
         if 'Image Orientation' in dng_stack.tags.keys() :
             ori = dng_stack.tags['Image Orientation'].values[0]
             debug_dict['accumulated robustness'] = apply_orientation(debug_dict['accumulated robustness'], ori)
-    
-    
-    
+
+
+
     return hr_output, debug_dict

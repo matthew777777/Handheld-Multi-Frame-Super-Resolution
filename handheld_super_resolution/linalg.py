@@ -7,14 +7,14 @@ Created on Thu Sep  1 08:41:58 2022
 
 import math
 
-from numba import cuda
+from numba import njit
 
 from.utils import EPSILON_DIV
 
-@cuda.jit(device=True)
+@njit(inline='always')
 def solve_2x2(A, B, X):
     """
-    Cuda function for resolving the 2x2 system A*X = B
+    Numba function for resolving the 2x2 system A*X = B
     by using the analytical formula
 
     Parameters
@@ -33,7 +33,7 @@ def solve_2x2(A, B, X):
     X[0] = (A[1, 1]*B[0] - A[0, 1]*B[1])/det_A
     X[1] = (A[0, 0]*B[1] - A[1, 0]*B[0])/det_A
 
-@cuda.jit(device=True)
+@njit(inline='always')
 def get_real_polyroots_2(a, b, c, roots):
     """
     Returns the two roots of the polynom a*X^2 + b*X + c = 0 for a, b and c
@@ -72,14 +72,14 @@ def get_real_polyroots_2(a, b, c, roots):
         roots[1] = r1
 
 
-@cuda.jit(device=True)
+@njit(inline='always')
 def get_eigen_val_2x2(M, l):
     a = 1
     b = -(M[0,0] + M[1, 1])
     c = M[0,0]*M[1,1] - M[0,1]*M[1,0]
     get_real_polyroots_2(a, b, c, l)
 
-@cuda.jit(device=True)
+@njit(inline='always')
 def get_eigen_vect_2x2(M, l, e1, e2):
     """
     return the eigen vectors with norm 1 for the eigen values l
@@ -128,13 +128,13 @@ def get_eigen_vect_2x2(M, l, e1, e2):
             e2[0] = -e1[1]*sign
     
     
-@cuda.jit(device=True)
+@njit(inline='always')
 def get_eigen_elmts_2x2(M, l, e1, e2):
     
     get_eigen_val_2x2(M, l)
     get_eigen_vect_2x2(M, l, e1, e2)
 
-@cuda.jit(device=True)
+@njit(inline='always')
 def bilinear_interpolation(values, pos):
     """
     

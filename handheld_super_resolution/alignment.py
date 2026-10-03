@@ -1,13 +1,10 @@
 import time
-import math
 
 import numpy as np
-from handheld_super_resolution.linalg import bilinear_interpolation
-from numba import cuda
+from numpy.typing import NDArray
 import torch
 import torch.nn.functional as F
-from typing import List, Optional, TYPE_CHECKING, Union, Literal
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
+from typing import List, Optional, TYPE_CHECKING, Union
 from .utils_image import preprocess
 
 if TYPE_CHECKING:
@@ -15,17 +12,17 @@ if TYPE_CHECKING:
 
 from .ICA import init_ica, align_lvl_ica
 from .block_matching import align_lvl_block_matching_L2, align_lvl_block_matching_L1
-from .utils import getTime, clamp, DEFAULT_NUMPY_FLOAT_TYPE, DEFAULT_CUDA_FLOAT_TYPE, DEFAULT_TORCH_FLOAT_TYPE, DEFAULT_THREADS
-from .utils_image import cuda_downsample
+from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, DEFAULT_TORCH_FLOAT_TYPE
+from .utils_image import downsample
 from .config import Config, AlignmentConfig
 
-SOBEL_Y = torch.as_tensor(np.array([[-1], [0], [1]]), dtype=DEFAULT_TORCH_FLOAT_TYPE, device="cuda")[None, None]
-SOBEL_X = torch.as_tensor(np.array([[-1,0,1]]), dtype=DEFAULT_TORCH_FLOAT_TYPE, device="cuda")[None, None]
+SOBEL_Y = torch.as_tensor(np.array([[-1], [0], [1]]), dtype=DEFAULT_TORCH_FLOAT_TYPE)[None, None]
+SOBEL_X = torch.as_tensor(np.array([[-1,0,1]]), dtype=DEFAULT_TORCH_FLOAT_TYPE)[None, None]
 SOBEL_Y.requires_grad = False
 SOBEL_X.requires_grad = False
 
 def init_alignment(
-        ref_img: DeviceNDArray,
+        ref_img: NDArray,
         config: Config,
         debug_writer: Optional["DebugWriter"] = None):
     h, w = ref_img.shape
@@ -43,8 +40,8 @@ def init_alignment(
     paddingBottom = paddingPatchesHeight
     paddingLeft = 0
     paddingRight = paddingPatchesWidth
-    
-    th_ref_img = torch.as_tensor(ref_img, dtype=DEFAULT_TORCH_FLOAT_TYPE, device="cuda")[None, None]
+
+    th_ref_img = torch.as_tensor(ref_img, dtype=DEFAULT_TORCH_FLOAT_TYPE)[None, None]
     th_ref_img_padded = F.pad(th_ref_img, (paddingLeft, paddingRight, paddingTop, paddingBottom), 'circular')
 
 
@@ -63,9 +60,9 @@ def init_alignment(
 
     tiled_fft: List[torch.Tensor] = []
     tiled_pyr: List[torch.Tensor] = []
-    gradx_pyramid:  List[DeviceNDArray] = []
-    grady_pyramid: List[DeviceNDArray] = []
-    hessian_pyramid: List[DeviceNDArray] = []
+    gradx_pyramid:  List[NDArray] = []
+    grady_pyramid: List[NDArray] = []
+    hessian_pyramid: List[NDArray] = []
     for i, lvl in enumerate(pyramid):
         ts = tile_sizes[len(factors) - i - 1]
         gradx, grady, hessian = init_ica(lvl, ts, config)
@@ -85,7 +82,7 @@ def init_alignment(
 
     if verbose:
         currentTime = getTime(currentTime, ' --- Create ref pyramid')
-    
+
     return pyramid, tiled_pyr, tiled_fft, gradx_pyramid, grady_pyramid, hessian_pyramid
 
 
@@ -93,11 +90,11 @@ def build_gaussian_pyramid(image: torch.Tensor, factors: List[int]=[1, 2, 4, 4],
     if preprocessing is not None:
         image = preprocess(image, preprocessing)
 
-    pyramid = [cuda_downsample(image, kernel, factors[0])]
+    pyramid = [downsample(image, kernel, factors[0])]
 
     for factor in factors[1:]:
-        pyramid.append(cuda_downsample(pyramid[-1], kernel, factor))
-    
+        pyramid.append(downsample(pyramid[-1], kernel, factor))
+
     pyramid = [lvl.squeeze() for lvl in pyramid]
 
     return pyramid[::-1]
@@ -111,20 +108,20 @@ def _write_grayscale_pyramid(
     # the debug category names use level 0 for the finest resolution.
     debug_writer.write_grayscale_pyramid(
         category,
-        (level.detach().cpu().numpy() for level in reversed(pyramid)),
+        (level.detach().numpy() for level in reversed(pyramid)),
     )
 
 def align(ref_pyramid: List[torch.Tensor],
           tyled_pyr: List[torch.Tensor],
           ref_tiled_fft: List[torch.Tensor],
-          ref_gradx: List[DeviceNDArray],
-          ref_grady: List[DeviceNDArray],
-          ref_hessian: List[DeviceNDArray],
-          img: DeviceNDArray, config: Config,
+          ref_gradx: List[NDArray],
+          ref_grady: List[NDArray],
+          ref_hessian: List[NDArray],
+          img: NDArray, config: Config,
           debug_writer: Optional["DebugWriter"] = None):
 
-    th_img = torch.as_tensor(img, dtype=DEFAULT_TORCH_FLOAT_TYPE, device="cuda")[None, None]
-    
+    th_img = torch.as_tensor(img, dtype=DEFAULT_TORCH_FLOAT_TYPE)[None, None]
+
     currentTime, verbose = time.perf_counter(), config.verbose > 2
 
     # factors, tileSizes, distances, searchRadia and subpixels are described fine-to-coarse
@@ -138,7 +135,6 @@ def align(ref_pyramid: List[torch.Tensor],
         )
 
     if verbose:
-        cuda.synchronize()
         currentTime = getTime(currentTime, ' - Create moving pyramid')
 
     alignments = None
@@ -146,11 +142,8 @@ def align(ref_pyramid: List[torch.Tensor],
         ref_pyramid, tyled_pyr, ref_tiled_fft, ref_gradx, ref_grady, ref_hessian, moving_pyramid)):
 
         list_id = len(ref_pyramid) - l - 1
-        # PyTorch uses per-thread default streams; Numba uses the CUDA default stream (presumably)
-        # Without this barrier, PyTorch could read 'alignment' before the kernel writes finish.
-        cuda.synchronize()
         if alignments is None:
-            alignments = torch.zeros((*ref_tiled_fft_lvl.shape[:2], 2), dtype=DEFAULT_TORCH_FLOAT_TYPE, device="cuda")
+            alignments = torch.zeros((*ref_tiled_fft_lvl.shape[:2], 2), dtype=DEFAULT_TORCH_FLOAT_TYPE)
         else:
             alignments = upscale_lvl(alignments, ref_tiled_fft_lvl.shape[:2], list_id, config) # Juste a re-tiling and scaling
 
@@ -158,17 +151,16 @@ def align(ref_pyramid: List[torch.Tensor],
             align_lvl(
                 ref_lvl, tyled_pyr_lvl, ref_tiled_fft_lvl, ref_gradx_lvl, ref_grady_lvl, ref_hessian_lvl,
                 moving_lvl, alignments, l=list_id, config=config)
-            
+
         if verbose:
-            cuda.synchronize()
             currentTime = getTime(currentTime, ' - Align pyramid')
     assert alignments is not None
-    alignments = cuda.as_cuda_array(alignments) # torch -> numba
+    alignments = np.ascontiguousarray(alignments.detach().numpy()) # torch -> numpy
     return alignments
 
 
-def align_lvl(ref_lvl: DeviceNDArray, tyled_pyr_lvl: DeviceNDArray, ref_fft_lvl: DeviceNDArray, ref_gradx_lvl: DeviceNDArray,
-              ref_grady_lvl: DeviceNDArray, ref_hessian_lvl: DeviceNDArray, moving_lvl: DeviceNDArray, alignments: torch.Tensor, l: int, config: Config):
+def align_lvl(ref_lvl: torch.Tensor, tyled_pyr_lvl: torch.Tensor, ref_fft_lvl: torch.Tensor, ref_gradx_lvl: NDArray,
+              ref_grady_lvl: NDArray, ref_hessian_lvl: NDArray, moving_lvl: torch.Tensor, alignments: torch.Tensor, l: int, config: Config):
     verbose = config.verbose > 2
     currentTime = time.perf_counter()
 
@@ -181,14 +173,12 @@ def align_lvl(ref_lvl: DeviceNDArray, tyled_pyr_lvl: DeviceNDArray, ref_fft_lvl:
         raise ValueError("Unknown block matching metric {}".format(metric))
 
     if verbose:
-        cuda.synchronize()
         currentTime = getTime(currentTime, ' -- Block matching level {}'.format(l))
 
     align_lvl_ica(ref_lvl, ref_gradx_lvl, ref_grady_lvl, ref_hessian_lvl,
                   moving_lvl, alignments, l, config)
-    
+
     if verbose:
-        cuda.synchronize()
         currentTime = getTime(currentTime, ' -- ICA level {}'.format(l))
 
 
@@ -216,4 +206,3 @@ def upscale_lvl(alignments: torch.Tensor, npatchs: List[int], l: int, config: Co
             mode='constant', value=0)
 
     return upsampled_alignments
-    
