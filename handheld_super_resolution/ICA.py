@@ -94,7 +94,14 @@ def cpu_ica(ref_img, gradx, grady, hessian, moving, alignment, niter, clip_radiu
     refined with ``niter`` Gauss-Newton steps using the precomputed Hessian.
     Preserved per-tile-size semantics: 8x8 tiles sample with clamped borders
     and clip partial sums during reduction (no update clipping), while larger
-    tiles sample zero outside the image and clip the update step.
+    tiles sample zero outside the image and clip the update step (64 px tiles
+    never clip, as in CUDA).
+
+    Intentional deviation for 64 px tiles (used when SNR <= 14 dB): the CUDA
+    kernel ``ica_kernel_64`` slid its 4-row bilinear window one row too far
+    (``floor_y += 1`` before loading row ``floor_y + 1``), so each pixel
+    interpolated rows y0 and y0+2, biasing the vertical flow by about one row.
+    This port interpolates rows y0 and y0+1 for every pixel.
     """
     h, w = moving.shape
     n_tiles_y, n_tiles_x, _ = alignment.shape

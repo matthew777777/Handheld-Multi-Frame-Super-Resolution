@@ -4,7 +4,7 @@ import numpy as np
 from numba import njit, prange
 import torch
 
-from .utils import DEFAULT_TORCH_FLOAT_TYPE, round_half_away
+from .utils import DEFAULT_TORCH_FLOAT_TYPE, round_half_even
 from .config import Config
 
 BOX_FILTER_8 = torch.as_tensor(np.ones((1,1,8,8)), dtype=DEFAULT_TORCH_FLOAT_TYPE)
@@ -87,11 +87,17 @@ def align_lvl_block_matching_L1(ref_lvl: torch.Tensor, moving_lvl: torch.Tensor,
 def cpu_l1_local_search(ref, moving, search_radius, alignments, tile_size):
     """Exhaustive L1 block matching around the current flow, one tile per task.
 
-    Equivalent to the former per-tile-size CUDA kernels: for each tile, the
-    L1 error between the reference tile and the moving image shifted by
-    ``flow + (shift_x, shift_y)`` is minimized over the search window, and
-    the winning (first minimum in scan order) shift is added to the flow.
-    Out-of-bounds moving samples read as 0.
+    Equivalent to the former CUDA kernels for 16 and 32 px tiles: for each
+    tile, the L1 error between the reference tile and the moving image
+    shifted by ``flow + (shift_x, shift_y)`` is minimized over the search
+    window, and the winning (first minimum in scan order) shift is added to
+    the flow. Out-of-bounds moving samples read as 0. The start flow is
+    rounded half-to-even, as CUDA ``round()`` (``__nv_llrint``) does.
+
+    Intentional deviation for 64 px tiles (used when SNR <= 14 dB): the CUDA
+    kernel ``cuda_L1_local_search64`` indexed the shared moving patch without
+    ``shift_x``/``shift_y``, so every candidate had the same error and it
+    always returned ``(-R, -R)``. This port performs the real search.
     """
     h, w = moving.shape
     n_tiles_y, n_tiles_x, _ = alignments.shape
@@ -100,8 +106,8 @@ def cpu_l1_local_search(ref, moving, search_radius, alignments, tile_size):
         tile_y = tile_id // n_tiles_x
         tile_x = tile_id % n_tiles_x
 
-        flow_x = round_half_away(alignments[tile_y, tile_x, 0])
-        flow_y = round_half_away(alignments[tile_y, tile_x, 1])
+        flow_x = round_half_even(alignments[tile_y, tile_x, 0])
+        flow_y = round_half_even(alignments[tile_y, tile_x, 1])
 
         best_err = np.float32(np.inf)
         best_shift_x = -search_radius

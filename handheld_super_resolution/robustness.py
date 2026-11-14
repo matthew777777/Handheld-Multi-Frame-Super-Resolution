@@ -18,7 +18,7 @@ from numba import njit, prange
 from numpy.typing import NDArray
 from typing import Optional, Tuple
 
-from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, clamp, round_half_away, timer
+from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, clamp, round_half_even, timer
 from .utils_image import dogson_biquadratic_kernel, dogson_quadratic_kernel
 from .config import Config
 from .debug_writer import DebugWriter
@@ -234,8 +234,8 @@ def cpu_compute_local_stats(guide_img, mean, var):
         idy = rem // guide_imshape_x
         x = rem % guide_imshape_x
 
-        mean_ = np.float32(0)
-        var_ = np.float32(0)
+        mean_ = 0.0  # CUDA kernel: mean_ = 0 (int) -> numba unifies to float64
+        var_ = 0.0  # float64, as in the CUDA kernel
         for i in range(-1, 2):
             for j in range(-1, 2):
                 y = clamp(idy + i, 0, guide_imshape_y-1)
@@ -309,11 +309,11 @@ def cpu_warp_dogson(source, flow, tile_size, warped):
                 warped[c, y, x] = np.inf # infinity will imply R = 0
             continue
 
-        center_y = round_half_away(y_mov)
-        center_x = round_half_away(x_mov)
+        center_y = round_half_even(y_mov)
+        center_x = round_half_even(x_mov)
 
         # init buffer
-        w_acc = np.float32(0)
+        w_acc = 0.0  # CUDA kernel: w_acc = 0 -> float64
         buffer = np.empty(3, np.float32)
         for c in range(n_channels):
             buffer[c] = 0
@@ -371,8 +371,8 @@ def cpu_compute_d_sigma(means_r, means_m, var_r, sigma_sq_curve, d_sq_curve, d_s
         y = pix_id // nx
         x = pix_id % nx
 
-        d_sq_ = np.float32(0)
-        sigma_sq_ = np.float32(0)
+        d_sq_ = 0.0  # CUDA kernel: d_sq_ = 0 -> float64
+        sigma_sq_ = 0.0  # float64, as in the CUDA kernel
         for c in range(nc):
             error = means_r[c, y, x] - means_m[c, y, x]
             d_sq_ += error * error
@@ -380,12 +380,12 @@ def cpu_compute_d_sigma(means_r, means_m, var_r, sigma_sq_curve, d_sq_curve, d_s
 
 
         if do_noise_correction:
-            brightness = np.float32(0)
+            brightness = 0.0  # float64, as in the CUDA kernel
             for c in range(nc):
                 brightness += means_r[c, y, x]
             brightness /= nc
             brightness = clamp(brightness, 0, 1)
-            id_noise = round_half_away((sigma_sq_curve.shape[0] - 1) * brightness)
+            id_noise = round_half_even((sigma_sq_curve.shape[0] - 1) * brightness)
 
             d_noise_sq = d_sq_curve[id_noise]
             sigma_noise_sq = sigma_sq_curve[id_noise]

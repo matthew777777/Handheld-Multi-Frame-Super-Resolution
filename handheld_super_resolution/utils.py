@@ -52,12 +52,15 @@ def clamp(x, min_, max_):
     return min(max_, max(min_, x))
 
 @njit(inline='always')
-def round_half_away(x):
-    """Round half away from zero (matches CUDA round() semantics)."""
-    if x >= 0:
-        return math.floor(x + 0.5)
-    else:
-        return math.ceil(x - 0.5)
+def round_half_even(x):
+    """Round to nearest, ties to even, returned as an int.
+
+    This is what the original Numba-CUDA kernels got from Python ``round(x)``:
+    numba.cuda lowers one-argument ``round`` on f4/f8 to libdevice
+    ``__nv_llrint`` (round-to-nearest-even), see ``ptx_round`` in
+    numba/cuda/cudaimpl.py. It is NOT round-half-away-from-zero.
+    """
+    return int(np.rint(x))
 
 def mse(im1, im2):
     return np.linalg.norm(im1 - im2) / np.prod(im1.shape)
