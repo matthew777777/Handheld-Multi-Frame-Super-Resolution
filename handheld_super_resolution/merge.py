@@ -16,7 +16,7 @@ from numba import njit, prange
 from numpy.typing import NDArray
 from typing import Union
 
-from .utils import DEFAULT_NUMPY_FLOAT_TYPE
+from .utils import DEFAULT_NUMPY_FLOAT_TYPE, FINAL_TILE_ORIGIN, FINAL_TILE_STRIDE
 from .config import Config
 
 
@@ -84,8 +84,11 @@ def cpu_accumulate(comp_img, alignments, covs, r,
         lr_x = (hr_j + 0.5) / scale
         lr_y = (hr_i + 0.5) / scale
 
-        px = int(lr_x//tile_size)
-        py = int(lr_y//tile_size)
+        # Upstream b71c534 does not clamp here and reads past the flow grid in
+        # the last stride of grey pixels (right/bottom border); clamp like the
+        # robustness warp does.
+        px = min(max(int((lr_x / 2 - FINAL_TILE_ORIGIN) // FINAL_TILE_STRIDE), 0), alignments.shape[1]-1)
+        py = min(max(int((lr_y / 2 - FINAL_TILE_ORIGIN) // FINAL_TILE_STRIDE), 0), alignments.shape[0]-1)
         flowx = alignments[py, px, 0]
         flowy = alignments[py, px, 1]
 
@@ -106,13 +109,8 @@ def cpu_accumulate(comp_img, alignments, covs, r,
             j_r = min(int(lr_x), lr_w-1)
             local_r = r[i_r, j_r]
 
-        lr_mov_x = lr_x + flowx
-        lr_mov_y = lr_y + flowy
-
-        # updating inbound condition
-        if not (0 <= lr_mov_x < lr_w and
-                0 <= lr_mov_y < lr_h):
-            continue
+        lr_mov_x = lr_x + 2. * flowx
+        lr_mov_y = lr_y + 2. * flowy
 
         # computing kernel
         if bayer_mode :
@@ -128,10 +126,10 @@ def cpu_accumulate(comp_img, alignments, covs, r,
         frac_x = kmap_j - int(kmap_j)
         frac_y = kmap_i - int(kmap_i)
 
-        floor_x = max(int(kmap_j), 0)
-        floor_y = max(int(kmap_i), 0)
-        ceil_x = min(floor_x + 1, covs.shape[1]-1)
-        ceil_y = min(floor_y + 1, covs.shape[0]-1)
+        floor_x = min(max(int(kmap_j), 0), covs.shape[1]-1)
+        floor_y = min(max(int(kmap_i), 0), covs.shape[0]-1)
+        ceil_x = min(max(floor_x + 1, 0), covs.shape[1]-1)
+        ceil_y = min(max(floor_y + 1, 0), covs.shape[0]-1)
 
         tr_cov_xx = covs[floor_y, floor_x, 0, 0]
         tr_cov_xy = covs[floor_y, floor_x, 0, 1]

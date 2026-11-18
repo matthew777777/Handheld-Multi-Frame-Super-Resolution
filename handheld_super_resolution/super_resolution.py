@@ -23,8 +23,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .utils_image import compute_grey_images, apply_orientation, rggb_to_cfa, estimate_image_snr
-from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, divide, add, timer
-from .alignment import align, init_alignment
+from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, divide, add, timer, FINAL_TILE_SIZE, FINAL_TILE_STRIDE
+from . import alignment
 from .config import Config
 from .debug_writer import DebugWriter, NAN_COLOR
 from .params import runtime_config, sanitize_config, update_snr_config
@@ -34,6 +34,17 @@ from .noise_lut import load_noise_lut
 from .kernels import estimate_kernels
 from .merge import merge
 from . import raw2rgb
+
+def alignment_options(config: Config) -> dict:
+    """Translate fine-to-coarse pipeline settings to the native API."""
+    return {
+        "scale_factors": config.alignment.factors,
+        "tile_sizes": config.alignment.tile_sizes,
+        "search_radii": config.alignment.search_radii,
+        "norm": config.alignment.block_matching.metrics,
+        "ica_iterations": config.alignment.ica.n_iter,
+    }
+
 
 def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: Config) -> Tuple[NDArray, Dict[str, NDArray]]:
     """
@@ -68,13 +79,13 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
     verbose_3 = config.verbose >= 3
 
     init_robustness_ = timer(init_robustness, verbose_2, "\nEstimating ref image local stats", 'Local stats estimated (Total)')
-    compute_grey_images_ = timer(compute_grey_images, verbose_3, end_s="- Grey images estimated by {}".format(grey_method))
+    compute_grey_images_ = timer(compute_grey_images, verbose_3, end_s=f"- Grey images estimated by {grey_method.value}")
     compute_robustness_ = timer(compute_robustness, verbose_2, '\nEstimating robustness', 'Robustness estimated (Total)')
     estimate_kernels_ = timer(estimate_kernels, verbose_2, '\nEstimating kernels', 'Kernels estimated (Total)')
     merge_ = timer(merge, verbose_2, '\nAccumulating Image', 'Image accumulated (Total)')
     divide_ = timer(divide, verbose_2, end_s='\n------------------------\nImage normalized (Total)')
-    init_alignment_ = timer(init_alignment, verbose_2, '\nInitializing alignment', 'Alignment initialized (Total)')
-    align_ = timer(align, verbose_2, '\nBeginning alignment', 'Image aligned (Total)')
+    init_alignment_ = timer(alignment.build_reference_pyramid, verbose_2, '\nInitializing alignment', 'Alignment initialized (Total)')
+    align_ = timer(alignment.align, verbose_2, '\nBeginning alignment', 'Image aligned (Total)')
 
     bayer_mode = config.mode=='bayer'
     debug_dict = {}
@@ -109,9 +120,12 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
     else:
         ref_grey = ref_arr
 
-    ref_pyramid, tyled_pyr, ref_tiled_fft, ref_gradx, ref_grady, ref_hessian = init_alignment_(
-        ref_grey, config, debug_writer
-    )
+    options = alignment_options(config)
+    ref_pyramid = init_alignment_(ref_grey, **options)
+    if debug_writer is not None:
+        debug_writer.write_grayscale_pyramid(
+            "alignment_reference_grey_pyramid", (level.image for level in ref_pyramid.levels)
+        )
 
     #### Local stats estimation
     if config.robustness.enabled:
@@ -137,7 +151,9 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
     kernels = estimate_kernels_(ref_arr, config)
 
     ##### Merge ref
-    dummy_alignment = np.zeros(ref_hessian[-1].shape[:-1], dtype = DEFAULT_NUMPY_FLOAT_TYPE)
+    dummy_alignment = np.zeros(((ref_grey.shape[0] - FINAL_TILE_SIZE) // FINAL_TILE_STRIDE + 1,
+                                (ref_grey.shape[1] - FINAL_TILE_SIZE) // FINAL_TILE_STRIDE + 1, 2),
+                               dtype=DEFAULT_NUMPY_FLOAT_TYPE)
     dummy_r = np.ones(ref_arr.shape, dtype = DEFAULT_NUMPY_FLOAT_TYPE)
     merge_(ref_arr, dummy_alignment, kernels, dummy_r, num, den, config)
 
@@ -158,22 +174,26 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
 
         #### Compute Grey Images
         if bayer_mode:
-            frame_grey = compute_grey_images(frame_buf, grey_method)
+            frame_grey = compute_grey_images_(frame_buf, grey_method)
         else:
             frame_grey = frame_buf
 
-        alignment = align_(ref_pyramid, tyled_pyr, ref_tiled_fft, ref_gradx, ref_grady, ref_hessian,
-                        frame_grey, config, debug_writer)
+        moving_pyramid = alignment.build_moving_pyramid(frame_grey, **options)
+        if debug_writer is not None:
+            debug_writer.write_grayscale_pyramid(
+                "alignment_moving_grey_pyramid", (level.image for level in moving_pyramid.levels)
+            )
+        flow = align_(ref_pyramid, moving_pyramid)
 
         if debug_writer is not None:
-            debug_writer.write_flow("optical_flow", alignment)
+            debug_writer.write_flow("optical_flow", flow)
 
         #### Robustness
         if config.robustness.enabled:
             assert ref_local_means is not None
             assert ref_local_stds is not None
             robustness = compute_robustness_(
-                frame_buf, ref_local_means, ref_local_stds, alignment,
+                frame_buf, ref_local_means, ref_local_stds, flow,
                 (sigma_sq_curve_arr, d_sq_curve_arr), config, debug_writer,
             )
         else:
@@ -186,7 +206,7 @@ def main(ref_img: NDArray[np.float32], comp_imgs: NDArray[np.float32], config: C
         kernels = estimate_kernels_(frame_buf, config)
 
         #### Merging
-        merge_(frame_buf, alignment, kernels, robustness, num, den, config)
+        merge_(frame_buf, flow, kernels, robustness, num, den, config)
 
         if verbose :
             getTime(im_time, '\nImage processed (Total)')

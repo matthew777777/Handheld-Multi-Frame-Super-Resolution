@@ -38,6 +38,23 @@ python -m pip install .
 > This port runs entirely on CPU (Numba multithreaded kernels + PyTorch CPU). No GPU, NVIDIA driver, or CUDA Toolkit is required, and installation works on x86-64 and ARM64 (including Apple Silicon) via the same commands.
 
 
+Before running the pipeline, compile the C++/Halide alignment extension; installing
+the Python package alone does not build it. From the repository root:
+
+```bash
+# Install the native build dependencies with uv or pip
+uv sync --extra native
+# Or: python -m pip install '.[native]'
+
+cmake -S alignment -B build/alignment \
+  -DPython_EXECUTABLE="$PWD/.venv/bin/python" -DCMAKE_BUILD_TYPE=Release
+cmake --build build/alignment -j 2
+```
+
+This requires CMake 3.28+, a C++17 compiler and Python development headers.
+Rebuild after changing the alignment sources or switching Python versions. See
+[the alignment build instructions](alignment/README.md) for details and checks.
+
 ### Running the code
 Place your .dng image burst in the `./test_burst/` folder. You can download some dng bursts [here](https://github.com/goutamgmb/deep-rep), or download the latest release of the code already containing test bursts. Now, simply run the code for x2 super-resolution with:
 ```bash
@@ -56,7 +73,7 @@ If noise correction is enabled (the default), you wille also need to provide the
 To obtain the bursts used in the publication, please download the latest release of the repo. It contains the code and two raw bursts of respectively 13 images from [[Bhat et al., ICCV21]](https://arxiv.org/abs/2108.08286) and 20 images from [[Lecouat et al., SIGGRAPH22]](https://arxiv.org/abs/2207.14671). Otherwise specify the path to any burst of raw images, e.g., `*.dng`, `*.ARW` or `*.CR2` for instance.
 
 ### Running the tests
-The CPU regression suite (synthetic end-to-end reconstruction, block-matching shift recovery, and a self-contained DNG burst test) runs with the standard library runner:
+The CPU regression suite (synthetic end-to-end reconstruction, native alignment shift recovery, and a self-contained DNG burst test) runs with the standard library runner:
 
 ```bash
 # uv

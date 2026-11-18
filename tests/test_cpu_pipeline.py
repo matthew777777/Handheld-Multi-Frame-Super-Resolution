@@ -11,7 +11,6 @@ import unittest
 
 import numpy as np
 
-from handheld_super_resolution.block_matching import align_lvl_block_matching_L1
 from handheld_super_resolution.config import Config
 from handheld_super_resolution.noise_lut import NoiseLut, save_noise_lut
 from handheld_super_resolution.params import sanitize_config, update_snr_config
@@ -40,8 +39,16 @@ def synthetic_burst(size=SIZE, n_frames=3, seed=0):
     return np.stack(frames)
 
 
+def small_pyramid(config):
+    """512 px synthetic frames are too small for the default 5-level pyramid."""
+    config.alignment.factors = [2, 4]
+    config.alignment.search_radii = [1, 3, 3]
+    config.alignment.block_matching.metrics = ["L1", "L2", "L2"]
+    return config
+
+
 def test_config(**overrides):
-    config = Config()
+    config = small_pyramid(Config())
     config.verbose = 0
     config.scale = 2
     config.force_snr = 24.0
@@ -109,27 +116,23 @@ class TestCpuPipeline(unittest.TestCase):
         # Grey mode only accumulates channel 0 (as on CUDA).
         self.assertTrue(np.isfinite(output[8:-8, 8:-8, 0]).all())
 
-    def test_l1_block_matching_recovers_shift(self):
-        import torch
+    def test_native_alignment_recovers_shift(self):
+        from handheld_super_resolution import alignment
 
         rng = np.random.default_rng(1)
-        ref = rng.random((64, 64), dtype=np.float32)
-        moving = np.roll(ref, shift=(3, -2), axis=(0, 1))
-        alignments = torch.zeros((4, 4, 2), dtype=torch.float32)
-        config = Config()
-        config.alignment.tile_sizes = [16]
-        config.alignment.search_radii = [4]
-        align_lvl_block_matching_L1(
-            torch.from_numpy(ref), torch.from_numpy(moving),
-            alignments, 0, config,
-        )
-        # np.roll shift (dy, dx) corresponds to flow (dx, dy).
-        np.testing.assert_array_equal(
-            alignments.numpy()[1:3, 1:3, 0], np.full((2, 2), -2.0)
-        )
-        np.testing.assert_array_equal(
-            alignments.numpy()[1:3, 1:3, 1], np.full((2, 2), 3.0)
-        )
+        from scipy.ndimage import gaussian_filter
+        ref = gaussian_filter(rng.random((256, 256)), 2).astype(np.float32)
+        ref = (ref - ref.min()) / (ref.max() - ref.min())
+        moving = np.ascontiguousarray(np.roll(ref, shift=(3, -2), axis=(0, 1)))
+        options = dict(scale_factors=[2, 4], tile_sizes=[16, 16, 8],
+                       search_radii=[1, 3, 3], norm=["L1", "L2", "L2"],
+                       ica_iterations=3)
+        flow = alignment.align(alignment.build_reference_pyramid(ref, **options),
+                               alignment.build_moving_pyramid(moving, **options))
+        # np.roll shift (dy, dx) -> sample moving at (x + dx, y + dy) = (x - 2, y + 3).
+        inner = flow[4:-4, 4:-4]
+        np.testing.assert_allclose(np.median(inner[..., 0]), -2.0, atol=0.1)
+        np.testing.assert_allclose(np.median(inner[..., 1]), 3.0, atol=0.1)
 
     def test_gat_matches_numpy(self):
         image = np.linspace(0, 1, 64, dtype=np.float32).reshape(8, 8)
@@ -176,7 +179,7 @@ class TestCpuPipeline(unittest.TestCase):
             lut_path = os.path.join(tmpdir, "test_noise.npz")
             save_noise_lut(lut_path, lut, trials=bins * 10, seed=0)
 
-            config = Config()
+            config = small_pyramid(Config())
             config.verbose = 0
             config.scale = 2
             config.force_snr = 24.0
@@ -204,7 +207,7 @@ class TestCpuPipeline(unittest.TestCase):
                 )
             os.chdir(tmpdir)  # debug frames land in a temp working copy
             try:
-                config = Config()
+                config = small_pyramid(Config())
                 config.verbose = 0
                 config.scale = 1
                 config.debug = True

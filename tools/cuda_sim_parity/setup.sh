@@ -1,6 +1,6 @@
 #!/bin/sh
-# Prepares the original Numba-CUDA code (Jamy-L upstream, commit 27c4655, the
-# parent of the CPU port) so it runs under the Numba CUDA simulator on a
+# Prepares the original Numba-CUDA code (Jamy-L upstream, commit b71c534, the
+# upstream state the CPU port is merged with; alignment is native Halide in both) so it runs under the Numba CUDA simulator on a
 # machine without an NVIDIA GPU, next to this CPU port:
 #   work/upsim/handheld_super_resolution   upstream, torch device "cuda" -> "cpu"
 #   work/kp/hsr_up, work/kp/hsr_fork       both packages under distinct names
@@ -9,7 +9,7 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd); W="$HERE/work"
 mkdir -p "$W/kp"
 [ -d "$W/upsim" ] || git clone -q https://github.com/Jamy-L/Handheld-Multi-Frame-Super-Resolution "$W/upsim"
-git -C "$W/upsim" checkout -q 27c4655ae4752898e0ae6e9737697c4d89c95226
+git -C "$W/upsim" checkout -q b71c5344e40a4a738ac6494f3b6ec5897922e29b
 sed -i.bak 's/device="cuda"/device="cpu"/g' "$W"/upsim/handheld_super_resolution/*.py && rm -f "$W"/upsim/handheld_super_resolution/*.bak
 ln -sfn "$W/upsim/handheld_super_resolution" "$W/kp/hsr_up"
 ln -sfn "$ROOT/handheld_super_resolution" "$W/kp/hsr_fork"

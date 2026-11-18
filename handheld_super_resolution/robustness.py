@@ -18,7 +18,7 @@ from numba import njit, prange
 from numpy.typing import NDArray
 from typing import Optional, Tuple
 
-from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, clamp, round_half_even, timer
+from .utils import getTime, DEFAULT_NUMPY_FLOAT_TYPE, clamp, round_half_even, timer, FINAL_TILE_ORIGIN, FINAL_TILE_STRIDE
 from .utils_image import dogson_biquadratic_kernel, dogson_quadratic_kernel
 from .config import Config
 from .debug_writer import DebugWriter
@@ -283,7 +283,6 @@ def warp_stats(local_stats: NDArray, tile_size: int, flow: NDArray):
 
 @njit(parallel=True)
 def cpu_warp_dogson(source, flow, tile_size, warped):
-    tile_size = tile_size // 2
     n_channels, ny, nx = source.shape
 
     for pix_id in prange(ny * nx):
@@ -291,23 +290,19 @@ def cpu_warp_dogson(source, flow, tile_size, warped):
         x = pix_id % nx
 
         # Flow is defined on the raw image basis
-        patch_idy = int(y//tile_size)
-        patch_idx = int(x//tile_size)
+        nty, ntx, _ = flow.shape
+        patch_idy = int((y - FINAL_TILE_ORIGIN)//FINAL_TILE_STRIDE)
+        patch_idy = min(max(patch_idy, 0), nty-1)
+        patch_idx = int((x - FINAL_TILE_ORIGIN)//FINAL_TILE_STRIDE)
+        patch_idx = min(max(patch_idx, 0), ntx-1)
 
         flow_x = flow[patch_idy, patch_idx, 0]
         flow_y = flow[patch_idy, patch_idx, 1]
 
 
         # Jumping from ref guide to mov guide
-        y_mov = y + flow_y * 0.5
-        x_mov = x + flow_x * 0.5
-
-        # Out of bounds
-        if not (0 <= y_mov < ny and
-                0 <= x_mov < nx):
-            for c in range(n_channels):
-                warped[c, y, x] = np.inf # infinity will imply R = 0
-            continue
+        y_mov = y + flow_y
+        x_mov = x + flow_x
 
         center_y = round_half_even(y_mov)
         center_x = round_half_even(x_mov)
@@ -476,7 +471,6 @@ def robustness_threshold(d_sq: NDArray, sigma_sq: NDArray, S: NDArray, t: float,
 
 @njit(parallel=True)
 def cpu_robustness_threshold(d_sq, sigma_sq, S, t, tile_size, bayer_mode, R):
-    tile_size = tile_size//2
 
     ny, nx = R.shape
     for pix_id in prange(ny * nx):

@@ -2,6 +2,7 @@ from typing import Tuple
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.ndimage import convolve1d
 from scipy.ndimage._filters import _gaussian_kernel1d
 from numba import njit, prange
 
@@ -10,6 +11,7 @@ import torch as th
 import torch.fft
 import torch.nn.functional as F
 
+from .config import GrayscaleMethod
 from .utils import getSigned, DEFAULT_NUMPY_FLOAT_TYPE, DEFAULT_TORCH_FLOAT_TYPE
 
 def apply_orientation(img, ori):
@@ -58,64 +60,32 @@ def apply_orientation(img, ori):
 
     return img
 
-def compute_grey_images(img: NDArray, method: str):
-    """
-    This function converts a raw image to a grey image, using the decimation or
-    the method of Alg. 3: ComputeGrayscaleImage
-
-    Parameters
-    ----------
-    img : Array[:, :]
-        Raw image J to convert to gray level.
-    method : str
-        ``FFT``, ``demosaicing``, or ``decimating``.
-
-    Raises
-    ------
-    ValueError
-        DESCRIPTION.
-
-    Returns
-    -------
-    img_grey : Array[:, :]
-        Corresponding grey scale image G
-
-    """
-    assert isinstance(img, np.ndarray), f"Got {type(img)}"
-    imsize_y, imsize_x = img.shape
-    if method == "FFT":
-        torch_img_grey = th.as_tensor(img, dtype=DEFAULT_TORCH_FLOAT_TYPE).clone()
-        # The clone preserves the original behavior: we don't want to modify
-        # the raw image, it is needed in the future.
-        # Note : the complex dtype of the fft2 is inherited from DEFAULT_TORCH_FLOAT_TYPE.
-        # Therefore, for DEFAULT_TORCH_FLOAT_TYPE = float32 we directly get complex64
-        torch_img_grey = torch.fft.fft2(torch_img_grey)
-
-        torch_img_grey = torch.fft.fftshift(torch_img_grey)
-
-        torch_img_grey[:imsize_y//4, :] = 0
-        torch_img_grey[:, :imsize_x//4] = 0
-        torch_img_grey[-imsize_y//4:, :] = 0
-        torch_img_grey[:, -imsize_x//4:] = 0
-
-        torch_img_grey = torch.fft.ifftshift(torch_img_grey)
-        torch_img_grey = torch.fft.ifft2(torch_img_grey)
-        # Here, .real type inherits once again from the complex type.
-        return np.ascontiguousarray(torch_img_grey.real.numpy())
-    elif method == "demosaicing":
-        raw_img = np.asarray(img)
-        img_grey = demosaic_to_grey(raw_img)
-        return img_grey
-    elif method == "decimating":
-        grey_imshape_y, grey_imshape_x = grey_imshape = imsize_y//2, imsize_x//2
-
-        img_grey = np.empty(grey_imshape, DEFAULT_NUMPY_FLOAT_TYPE)
-
-        cpu_decimate_to_grey(img, img_grey)
-        return img_grey
-
+def compute_grey_images(image: NDArray, method: GrayscaleMethod) -> NDArray[np.float32]:
+    """Convert normalized RGGB Bayer data to NumPy gray for the native alignment."""
+    image = np.asarray(image, dtype=np.float32)
+    if image.ndim != 2 or any(size % 2 for size in image.shape):
+        raise ValueError("Bayer input must be a 2D image with even dimensions")
+    if method is GrayscaleMethod.DECIMATING:
+        gray = (image[::2, ::2] + image[::2, 1::2]
+                + image[1::2, ::2] + image[1::2, 1::2]) * 0.25
+        kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+        gray = convolve1d(convolve1d(gray, kernel, axis=0, mode="nearest"),
+                          kernel, axis=1, mode="nearest")
+    elif method is GrayscaleMethod.DEMOSAICING:
+        gray = demosaic_to_grey(image)
     else:
         raise ValueError(f"Unknown grayscale method: {method}")
+    # Demosaicing can overshoot the normalized sensor range; the native API
+    # requires finite grayscale samples in [0, 1].
+    return np.ascontiguousarray(np.clip(gray, 0, 1), dtype=np.float32)
+
+
+def average_bayer_quads(img: NDArray) -> NDArray:
+    """Average Bayer quads for merging kernel estimation (CUDA-parity order)."""
+    img = np.asarray(img)
+    grey = np.empty((img.shape[0]//2, img.shape[1]//2), DEFAULT_NUMPY_FLOAT_TYPE)
+    cpu_decimate_to_grey(img, grey)
+    return grey
 
 
 def demosaic_to_grey(img: NDArray) -> NDArray[np.float32]:
@@ -130,7 +100,8 @@ def demosaic_to_grey(img: NDArray) -> NDArray[np.float32]:
         ) from error
 
     rgb = demosaicing_CFA_Bayer_Menon2007(img, pattern="RGGB")
-    return np.ascontiguousarray(np.mean(rgb, axis=-1), dtype=DEFAULT_NUMPY_FLOAT_TYPE)
+    gray = 0.25*(rgb[:, :, 0] + 2*rgb[:, :, 1] + rgb[:, :, 2]) # Luma conversion, consistent with quad averaging
+    return np.ascontiguousarray(gray, dtype=DEFAULT_NUMPY_FLOAT_TYPE)
 
 def preprocess(img: torch.Tensor, preprocessing: str):
     if preprocessing == "sqrt":
